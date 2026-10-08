@@ -3,6 +3,7 @@ pub mod billing;
 pub mod config;
 pub mod content;
 pub mod crypto;
+pub mod dns;
 pub mod error;
 pub mod operations;
 pub mod resources;
@@ -46,6 +47,8 @@ pub fn router(s: App) -> Router {
  .route("/readyz",get(|State(s):State<App>|async move{sqlx::query("SELECT 1").execute(&s.db).await.map(|_|"ok").map_err(error::Error::from)}))
  .route("/api/auth/register",post(auth::register)).route("/api/auth/login",post(auth::login)).route("/api/auth/mfa",post(auth::verify_mfa)).route("/api/auth/me",get(auth::me)).route("/api/auth/logout",post(auth::logout)).route("/api/auth/security",post(auth::security)).route("/api/auth/sessions",get(auth::sessions)).route("/api/auth/forgot",post(auth::forgot)).route("/api/auth/reset",post(auth::reset))
  .route("/api/packages",get(billing::packages)).route("/api/quote",post(billing::pricing)).route("/api/orders",post(billing::order)).route("/api/invoices/{id}",get(billing::invoice)).route("/api/subscriptions/{id}",post(billing::manual)).route("/sepay/webhook",post(billing::webhook).get(||async{axum::Json(serde_json::json!({"service":"SePay webhook","method":"POST"}))}))
+ .route("/api/domains/{id}/dns",get(dns::instructions))
+ .route("/api/domains/{id}/verify",post(dns::verify))
  .route("/api/dashboard",get(resources::dashboard)).route("/api/resources/{kind}",get(resources::list).post(resources::save))
  .route("/api/content",get(content::public).post(content::save)).route("/api/trials",post(operations::trial)).route("/api/trials/{id}",post(operations::trial_review))
  .route("/api/operations/read",post(operations::read)).route("/api/operations/preview",post(operations::preview)).route("/api/operations/execute/{id}",post(operations::execute))

@@ -119,7 +119,14 @@ async fn tenant_quotas_sessions_and_payments(pool: sqlx::PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK, "{o}");
     let sid = o["id"].as_i64().unwrap();
-    assert_eq!(o["quote"]["total"], "20");
+    assert_eq!(
+        o["quote"]["total"]
+            .as_str()
+            .unwrap()
+            .parse::<rust_decimal::Decimal>()
+            .unwrap(),
+        rust_decimal::Decimal::from(20)
+    );
     let (status, _, _) = request(&app, &format!("/api/invoices/{sid}"), None, Some(&cb)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let(status,_,_)=request(&app,"/api/resources/servers",Some(json!({"name":"Fixture","base_url":"http://unused.example","dry_run":1,"active":1,"is_primary":1})),Some(&admin_client)).await;

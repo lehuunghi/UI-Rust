@@ -94,6 +94,15 @@ async fn sync_one(s: &App) -> Result<()> {
                 let remote = result["methodResponses"][0][1]["created"]["item"]["id"]
                     .as_str()
                     .ok_or_else(|| anyhow!("Missing remote id"))?;
+                if table == "domains" {
+                    let zone =
+                        result["methodResponses"][0][1]["created"]["item"]["dnsZoneFile"].as_str();
+                    sqlx::query("UPDATE domains SET dns_records=$1 WHERE id=$2")
+                        .bind(zone)
+                        .bind(resource)
+                        .execute(&mut *tx)
+                        .await?;
+                }
                 let field = if table == "domains" {
                     "stalwart_domain_id"
                 } else {

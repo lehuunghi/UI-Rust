@@ -83,6 +83,23 @@ pub async fn execute(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    let mut connection_guard = s.db.begin().await?;
+    let version: Option<i64> = sqlx::query_scalar(
+        "SELECT config_version FROM stalwart_servers WHERE id=$1 AND active=1 FOR SHARE",
+    )
+    .bind(server)
+    .fetch_optional(&mut *connection_guard)
+    .await?;
+    if version != Some(r.get::<i64, _>("server_version")) {
+        sqlx::query("UPDATE rust_change_plans SET status='stale' WHERE id=$1")
+            .bind(id)
+            .execute(&mut *connection_guard)
+            .await?;
+        connection_guard.commit().await?;
+        return Err(Error::conflict(
+            "Cấu hình server đã thay đổi; tạo lại kế hoạch",
+        ));
+    }
     let (status, mut result) = match stalwart::call(&s, server, calls).await {
         Ok(v) => ("done", v),
         Err(_) => (
@@ -95,8 +112,9 @@ pub async fn execute(
         .bind(status)
         .bind(&result)
         .bind(id)
-        .execute(&s.db)
+        .execute(&mut *connection_guard)
         .await?;
+    connection_guard.commit().await?;
     auth::audit(
         &s,
         Some(u.id),

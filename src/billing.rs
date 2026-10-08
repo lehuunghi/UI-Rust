@@ -223,12 +223,17 @@ pub async fn manual(
     Ok(Json(json!({"ok":true})))
 }
 pub fn invoice_code(code: &str, content: &str) -> Result<String> {
-    let re = regex::Regex::new(r"(?i)(?:^|[^a-z0-9])(INV(?:[0-9]{12,25}|[0-9]{8}))(?:$|[^a-z0-9])")
-        .unwrap();
     let mut codes = std::collections::BTreeSet::new();
     for text in [code, content] {
-        for c in re.captures_iter(text) {
-            codes.insert(c[1].to_uppercase());
+        for word in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let word = word.to_ascii_uppercase();
+            if let Some(digits) = word.strip_prefix("INV") {
+                if (digits.len() == 8 || (12..=25).contains(&digits.len()))
+                    && digits.bytes().all(|b| b.is_ascii_digit())
+                {
+                    codes.insert(word);
+                }
+            }
         }
     }
     if codes.len() > 1 {
@@ -236,6 +241,7 @@ pub fn invoice_code(code: &str, content: &str) -> Result<String> {
     }
     Ok(codes.into_iter().next().unwrap_or_default())
 }
+
 fn integer(v: &Value) -> Result<i64> {
     let s = if let Some(s) = v.as_str() {
         s.to_owned()

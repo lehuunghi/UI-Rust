@@ -303,6 +303,19 @@ pub async fn verify_mfa(
     if !valid {
         return Err(Error::unauthorized());
     }
+    if method == "totp" {
+        let step = Utc::now().timestamp() / 30;
+        let changed =
+            sqlx::query("UPDATE users SET totp_last_step=$1 WHERE id=$2 AND totp_last_step<$1")
+                .bind(step)
+                .bind(u.id)
+                .execute(&s.db)
+                .await?
+                .rows_affected();
+        if changed == 0 {
+            return Err(Error::bad("Mã đã dùng; chờ mã tiếp theo"));
+        }
+    }
     let token = crypto::token();
     sqlx::query("UPDATE panel_sessions SET id=$1,authenticated=true,expires_at=now()+interval '12 hours' WHERE id=$2").bind(crypto::hash(&token)).bind(u.session).execute(&s.db).await?;
     Ok((
@@ -319,7 +332,7 @@ pub async fn me(State(s): State<App>, h: HeaderMap) -> Result<Json<Value>> {
     ))
 }
 pub async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
-    let u = require(&s, &h, "", false, false).await?;
+    let u = user(&s, &h, true).await?;
     origin(&s, &h)?;
     sqlx::query("DELETE FROM panel_sessions WHERE id=$1")
         .bind(u.session)
