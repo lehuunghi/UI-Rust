@@ -123,6 +123,11 @@ pub async fn order(
         rand::random::<u16>() % 10000
     );
     let id:i64=sqlx::query_scalar("INSERT INTO subscriptions(customer_id,package_id,price,invoice_code,bank_transfer_note,selected_email_accounts,selected_domains,base_price,extra_email_count,extra_domain_count,extra_email_price,extra_domain_price,start_date,end_date,renewal_for_subscription_id) VALUES($1,$2,$3,$4,$4,$5,$6,$7,$5,$8,$9,$10,current_date,current_date+$11-1,$12) RETURNING id").bind(u.owner).bind(p.id).bind(q.total).bind(&invoice).bind(q.emails).bind(q.domains).bind(q.email_total).bind(q.domains-p.min_domains).bind(q.unit).bind(p.extra_domain_price).bind(p.duration_days).bind(d.renewal_for).fetch_one(&mut *tx).await?;
+    let package_name: String = sqlx::query_scalar("SELECT name FROM packages WHERE id=$1")
+        .bind(p.id)
+        .fetch_one(&mut *tx)
+        .await?;
+    crate::notifications::queue(&s,&mut tx,u.id,"invoice_created",json!({"package_name":package_name,"invoice_code":invoice,"amount":q.total.to_string(),"invoice_url":format!("{}/customer/invoice?id={id}",s.config.app_url)}),Some(&format!("invoice:{id}"))).await?;
     tx.commit().await?;
     auth::audit(&s, Some(u.id), "invoice_created", json!({"id":id})).await?;
     Ok(Json(json!({"id":id,"invoice_code":invoice,"quote":q})))
@@ -149,7 +154,7 @@ pub async fn invoice(
     }
     Ok(Json(json!({"invoice":v,"qr_url":qr})))
 }
-pub async fn activate(tx: &mut Transaction<'_, Postgres>, id: i64) -> Result<()> {
+pub async fn activate(s: &App, tx: &mut Transaction<'_, Postgres>, id: i64) -> Result<()> {
     let r=sqlx::query("SELECT s.*,p.duration_days FROM subscriptions s JOIN packages p ON p.id=s.package_id WHERE s.id=$1 FOR UPDATE OF s").bind(id).fetch_optional(&mut **tx).await?.ok_or_else(Error::missing)?;
     if r.get::<Option<chrono::DateTime<Utc>>, _>("activated_at")
         .is_some()
@@ -179,6 +184,11 @@ pub async fn activate(tx: &mut Transaction<'_, Postgres>, id: i64) -> Result<()>
     let end = start + Duration::days(i64::from(r.get::<i32, _>("duration_days")) - 1);
     sqlx::query("UPDATE subscriptions SET status='active',payment_status='paid',paid_at=COALESCE(paid_at,now()),activated_at=now(),start_date=$1,end_date=$2,updated_at=now() WHERE id=$3").bind(start).bind(end).bind(id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO email_groups(customer_id,name) SELECT $1,'Mặc định' WHERE NOT EXISTS(SELECT 1 FROM email_groups WHERE customer_id=$1 AND status='active') ON CONFLICT DO NOTHING").bind(owner).execute(&mut **tx).await?;
+    let package_name: String = sqlx::query_scalar("SELECT name FROM packages WHERE id=$1")
+        .bind(r.get::<i64, _>("package_id"))
+        .fetch_one(&mut **tx)
+        .await?;
+    crate::notifications::queue(s,tx,owner,"subscription_activated",json!({"package_name":package_name,"email_limit":r.get::<i32,_>("selected_email_accounts"),"domain_limit":r.get::<i32,_>("selected_domains"),"end_date":end.to_string()}),Some(&format!("activate:{id}"))).await?;
     Ok(())
 }
 #[derive(Deserialize)]
@@ -203,7 +213,7 @@ pub async fn manual(
         .fetch_one(&mut *tx)
         .await?;
     match d.action.as_str() {
-        "activate" | "paid" => activate(&mut tx, id).await?,
+        "activate" | "paid" => activate(&s, &mut tx, id).await?,
         "cancel" => {
             sqlx::query("UPDATE subscriptions SET status='cancelled',updated_at=now() WHERE id=$1")
                 .bind(id)
@@ -315,13 +325,36 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
         ));
     }
     let p: Value = serde_json::from_slice(&body).map_err(|_| Error::bad("JSON không hợp lệ"))?;
+    record(&s, p, "live", "webhook").await
+}
+
+pub async fn record(s: &App, p: Value, mode: &str, source_kind: &str) -> Result<Json<Value>> {
+    if !["live", "sandbox"].contains(&mode) || !["webhook", "api"].contains(&source_kind) {
+        return Err(Error::bad("Nguồn giao dịch không hợp lệ"));
+    }
     if !p.is_object() {
         return Err(Error::bad("Cần JSON object"));
     }
     if p["id"] == 0 || p["id"] == "0" {
         return Ok(Json(json!({"success":true,"test":true})));
     }
-    let tid = integer(&p["id"])?;
+    let provider_id = if source_kind == "api" {
+        let id = p["id"].as_str().unwrap_or("").to_ascii_lowercase();
+        if !regex::Regex::new(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+            .unwrap()
+            .is_match(&id)
+        {
+            return Err(Error::bad("ID SePay API không hợp lệ"));
+        }
+        id
+    } else {
+        integer(&p["id"])?.to_string()
+    };
+    let tid = if source_kind == "webhook" {
+        Some(integer(&p["id"])?)
+    } else {
+        None
+    };
     let amount = integer(&p["transferAmount"])?;
     if amount > 9_999_999_999 {
         return Err(Error::bad("Số tiền ngoài phạm vi"));
@@ -353,7 +386,7 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
         p["content"].as_str().unwrap_or(""),
     )?;
     let reference = p["referenceCode"].as_str().unwrap_or("");
-    let source = format!("live:webhook:{tid}");
+    let source = format!("{mode}:{source_kind}:{provider_id}");
     let bank = if reference.is_empty() {
         None
     } else {
@@ -367,7 +400,7 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
     sqlx::query("SELECT pg_advisory_xact_lock(88261731)")
         .execute(&mut *tx)
         .await?;
-    let saved=sqlx::query("SELECT r.* FROM sepay_reconciliation r WHERE r.source_key=$1 OR (r.mode='live' AND r.bank_identity=$2) OR r.id IN (SELECT reconciliation_id FROM sepay_receipts WHERE source_key=$1)").bind(&source).bind(&bank).fetch_all(&mut *tx).await?;
+    let saved=sqlx::query("SELECT r.* FROM sepay_reconciliation r WHERE r.source_key=$1 OR (r.mode=$3 AND r.bank_identity=$2) OR r.id IN (SELECT reconciliation_id FROM sepay_receipts WHERE source_key=$1)").bind(&source).bind(&bank).bind(mode).fetch_all(&mut *tx).await?;
     if !saved.is_empty() {
         if saved.len() != 1 {
             return Err(Error::conflict("Conflicting transaction identities"));
@@ -395,14 +428,20 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
             .fetch_one(&mut *tx)
             .await?;
     }
-    let rid:i64=sqlx::query_scalar("INSERT INTO sepay_reconciliation(source_key,mode,source,provider_id,bank_identity,account_number,reference_code,amount,content,invoice_code,subscription_id,state) VALUES($1,'live','webhook',$2,$3,$4,$5,$6,$7,$8,$9,'unmatched') RETURNING id").bind(&source).bind(tid.to_string()).bind(bank).bind(&s.config.sepay_account).bind(reference).bind(Decimal::from(amount)).bind(p["content"].as_str().unwrap_or("")).bind(&code).bind(sid).fetch_one(&mut *tx).await?;
+    let rid:i64=sqlx::query_scalar("INSERT INTO sepay_reconciliation(source_key,mode,source,provider_id,bank_identity,account_number,reference_code,amount,content,invoice_code,subscription_id,state) VALUES($1,$10,$11,$2,$3,$4,$5,$6,$7,$8,$9,$12) RETURNING id").bind(&source).bind(provider_id).bind(&bank).bind(&s.config.sepay_account).bind(reference).bind(Decimal::from(amount)).bind(p["content"].as_str().unwrap_or("")).bind(&code).bind(sid).bind(mode).bind(source_kind).bind(if mode=="sandbox"{"sandbox"}else if source_kind=="api"&&bank.is_none(){"needs_review"}else{"unmatched"}).fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO sepay_receipts(source_key,reconciliation_id) VALUES($1,$2)")
         .bind(&source)
         .bind(rid)
         .execute(&mut *tx)
         .await?;
-    let mut state = "unmatched";
-    if let Some(id) = sid {
+    let mut state = if mode == "sandbox" {
+        "sandbox"
+    } else if source_kind == "api" && bank.is_none() {
+        "needs_review"
+    } else {
+        "unmatched"
+    };
+    if let Some(id) = sid.filter(|_| mode == "live" && state != "needs_review") {
         let r = sqlx::query("SELECT * FROM subscriptions WHERE id=$1 FOR UPDATE")
             .bind(id)
             .fetch_one(&mut *tx)
@@ -425,7 +464,7 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
             let total:Decimal=sqlx::query_scalar("SELECT COALESCE(sum(amount),0) FROM payment_transactions WHERE subscription_id=$1 AND provider='sepay' AND transfer_type='in'").bind(id).fetch_one(&mut *tx).await?;
             let due: Decimal = r.get("price");
             if total >= due {
-                activate(&mut tx, id).await?;
+                activate(&s, &mut tx, id).await?;
                 state = if total > due { "overpaid" } else { "paid" }
             } else {
                 state = "partial"
@@ -507,15 +546,20 @@ pub async fn reconcile(
         return Err(Error::conflict("Hóa đơn không còn nhận thanh toán"));
     }
     let r=sqlx::query("SELECT * FROM sepay_reconciliation WHERE id=$1 AND mode='live' AND ledger_id IS NULL AND state IN ('unmatched','needs_review') FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?.ok_or_else(||Error::conflict("Giao dịch không thể gán lại"))?;
-    let tid = r
-        .get::<String, _>("provider_id")
-        .parse::<i64>()
-        .map_err(|_| Error::bad("ID giao dịch không hợp lệ"))?;
+    let tid = if r.get::<String, _>("source") == "webhook" {
+        Some(
+            r.get::<String, _>("provider_id")
+                .parse::<i64>()
+                .map_err(|_| Error::bad("ID giao dịch không hợp lệ"))?,
+        )
+    } else {
+        None
+    };
     let lid:i64=sqlx::query_scalar("INSERT INTO payment_transactions(subscription_id,provider_transaction_id,account_number,reference_code,content,transfer_type,amount,raw_payload) VALUES($1,$2,$3,$4,$5,'in',$6,$7) RETURNING id").bind(sid).bind(tid).bind(r.get::<String,_>("account_number")).bind(r.get::<String,_>("reference_code")).bind(r.get::<String,_>("content")).bind(r.get::<Decimal,_>("amount")).bind(json!({"reconciliation_id":id,"actor":u.id})).fetch_one(&mut *tx).await?;
     let total:Decimal=sqlx::query_scalar("SELECT COALESCE(sum(amount),0) FROM payment_transactions WHERE subscription_id=$1 AND provider='sepay' AND transfer_type='in'").bind(sid).fetch_one(&mut *tx).await?;
     let due: Decimal = invoice.get("price");
     let state = if total >= due {
-        activate(&mut tx, sid).await?;
+        activate(&s, &mut tx, sid).await?;
         if total > due {
             "overpaid"
         } else {

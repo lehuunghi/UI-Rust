@@ -8,6 +8,22 @@ Rust; the browser interface uses HTML/CSS/JavaScript. No PHP or MySQL is require
 See [the migration matrix](docs/MIGRATION.md) for implemented features, differences,
 and remaining work. Do not point it at a production database from the PHP application.
 
+## Hướng dẫn cài đặt A–Z
+
+Xem [cài đặt Docker/VPS và vận hành](docs/INSTALL_VI.md),
+[cài trực tiếp bằng systemd](docs/INSTALL_NATIVE_VI.md) và
+[cấu hình Stalwart, SMTP, SePay, backup/recovery](docs/CONFIG_SERVICES_VI.md).
+Lấy nguồn từ nhánh `main`, ghi lại SHA và triển khai commit đã kiểm thử:
+
+```sh
+git clone --branch main --single-branch https://github.com/lehuunghi/UI-Rust.git
+cd UI-Rust
+git rev-parse HEAD
+```
+
+Có thể dùng gói nguồn kèm `SHA256SUMS` từ nguồn tin cậy để cài offline.
+Giữ SHA/checksum của từng release để dựng lại hoặc chuẩn bị rollback.
+
 ## Có gì trong bản này?
 
 - Trang chủ, bảng giá, giao diện quản trị và khách hàng, các đường dẫn tiếng Việt.
@@ -22,7 +38,11 @@ and remaining work. Do not point it at a production database from the PHP applic
 - Backup/restore PostgreSQL mã hóa bằng CLI Rust; worker xử lý tạm ngưng sau hết hạn.
 - Công cụ JMAP quản trị: tra cứu, xem trước thay đổi, xác nhận một lần, kiểm tra
   version server và phản hồi JMAP. Lệnh không được xác nhận không tự chạy lại.
-- Nội dung trang chủ, cấu hình công khai, bản dịch cập nhật theo từng khóa.
+- Nội dung trang chủ, catalog VI/EN và trình sửa ngôn ngữ, 11 mẫu email và thông báo gia hạn.
+- Import/export CSV, hồ sơ trial mã hóa, impersonation, SePay API live/sandbox.
+- Monitoring, báo cáo tháng, tenant binding, phân bổ server và migration preview.
+- Backup mailbox/recovery qua worker riêng, DKIM khẩn cấp và vault mã hóa.
+- Xem [đối chiếu chức năng](docs/PARITY.md) để biết bằng chứng và phần còn thiếu.
 - 52 bảng được chuyển từ schema gốc sang PostgreSQL, cộng các bảng runtime Rust.
   Có schema không đồng nghĩa đã chuyển toàn bộ logic của module tương ứng.
 

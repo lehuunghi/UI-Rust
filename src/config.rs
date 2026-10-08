@@ -10,6 +10,9 @@ pub struct Config {
     pub sepay_hmac: String,
     pub sepay_account: String,
     pub sepay_bank: String,
+    pub sepay_api_token: String,
+    pub sepay_api_mode: String,
+    pub sepay_poll_seconds: u64,
     pub smtp_host: String,
     pub smtp_user: String,
     pub smtp_password: String,
@@ -39,6 +42,11 @@ impl Config {
             sepay_hmac: env("SEPAY_HMAC_SECRET", ""),
             sepay_account: env("SEPAY_ACCOUNT_NUMBER", ""),
             sepay_bank: env("SEPAY_BANK_CODE", ""),
+            sepay_api_token: env("SEPAY_USER_API_TOKEN", ""),
+            sepay_api_mode: env("SEPAY_API_MODE", "live"),
+            sepay_poll_seconds: env("SEPAY_POLL_SECONDS", "0")
+                .parse()
+                .context("Invalid SEPAY_POLL_SECONDS")?,
             smtp_host: env("SMTP_HOST", ""),
             smtp_user: env("SMTP_USER", ""),
             smtp_password: env("SMTP_PASSWORD", ""),

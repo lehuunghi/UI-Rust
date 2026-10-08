@@ -26,8 +26,18 @@ fn credentials(p: &Value) -> Value {
     }
 }
 pub async fn tick(s: &App) -> Result<()> {
+    sqlx::query("INSERT INTO rust_worker_state(id,heartbeat_at) VALUES(1,now()) ON CONFLICT(id) DO UPDATE SET heartbeat_at=now()").execute(&s.db).await?;
+    sqlx::query("UPDATE emergency_dkim_plans SET status='uncertain',phase=NULL,error='Interrupted change; inspect remote keys',updated_at=now() WHERE status='applying' AND phase_expires_at<now()").execute(&s.db).await?;
+    sqlx::query("UPDATE reconciliation_items i SET status='uncertain',detail='Interrupted change; inspect remote before a new preview' FROM reconciliation_runs r WHERE i.run_id=r.id AND i.status='applying' AND r.created_at<now()-interval '35 minutes'").execute(&s.db).await?;
     sync_one(s).await?;
+    crate::monitor::tick(s).await.map_err(|e| anyhow!(e.1))?;
     lifecycle(s).await?;
+    crate::trials::retain(s).await?;
+    crate::sepay::poll(s).await?;
+    crate::backup_admin::tick(s).await?;
+    crate::notifications::reminders(s)
+        .await
+        .map_err(|e| anyhow!(e.1))?;
     mail_one(s).await?;
     sqlx::query("UPDATE subscriptions SET status='expired',updated_at=now() WHERE status='active' AND end_date<current_date").execute(&s.db).await?;
     sqlx::query("DELETE FROM panel_sessions WHERE expires_at<now()-interval '1 day'")
@@ -69,7 +79,7 @@ async fn sync_one(s: &App) -> Result<()> {
         &s.config.key,
         &r.get::<String, _>("payload_encrypted"),
     )?)?;
-    let (method, args) = match kind.as_str() {
+    let (method, mut args) = match kind.as_str() {
         "domain_create" => (
             "x:Domain/set",
             json!({"create":{"item":{"name":p["name"],"aliases":{},"isEnabled":true,"certificateManagement":{"@type":"Manual"},"dkimManagement":{"@type":"Automatic"},"dnsManagement":{"@type":"Manual"},"subAddressing":{"@type":"Enabled"}}}}),
@@ -94,6 +104,12 @@ async fn sync_one(s: &App) -> Result<()> {
         ),
         _ => return Err(anyhow!("Unknown sync job")),
     };
+    if kind == "domain_create" {
+        let tenant: Option<String> = sqlx::query_scalar("SELECT b.tenant_id FROM native_tenant_bindings b JOIN domains d ON d.customer_id=b.customer_id AND d.server_id=b.server_id WHERE d.id=$1 AND b.server_id=$2").bind(resource).bind(server).fetch_optional(&mut *tx).await?;
+        if let Some(tenant) = tenant {
+            args["create"]["item"]["memberTenantId"] = json!(tenant);
+        }
+    }
     let result = stalwart::call(s, server, json!([[method, args, "c1"]])).await;
     let table = if kind.starts_with("domain_") {
         "domains"

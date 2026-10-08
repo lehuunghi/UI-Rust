@@ -30,6 +30,8 @@ services:
   worker:
     build: .
     command: [worker]
+    volumes:
+      - panel_backups:/app/backups
     env_file: .env
     environment:
       DATABASE_URL: postgres://ui:${POSTGRES_PASSWORD}@db:5432/ui
@@ -37,6 +39,33 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+  mailbox-worker:
+    build: .
+    profiles: [mail-recovery]
+    command: [mailbox-worker]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://ui:${POSTGRES_PASSWORD}@db:5432/ui
+    volumes:
+      - panel_backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+  recovery-worker:
+    build: .
+    profiles: [mail-recovery]
+    command: [recovery-worker]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://ui:${POSTGRES_PASSWORD}@db:5432/ui
+    volumes:
+      - panel_backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   panel_backups:

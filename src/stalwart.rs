@@ -196,6 +196,25 @@ pub async fn call(s: &App, server: i64, calls: Value) -> Result<Value> {
     validate(&calls, &response)?;
     Ok(response)
 }
+pub fn safe_text(value: &str) -> String {
+    static PATTERNS: std::sync::LazyLock<Vec<(regex::Regex, &str)>> = std::sync::LazyLock::new(
+        || {
+            vec![
+        (regex::Regex::new(r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----").unwrap(),"[REDACTED]"),
+        (regex::Regex::new(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_=.-]+").unwrap(),"$1 [REDACTED]"),
+        (regex::Regex::new(r#"(?i)\b(password|passwd|secret|token|authorization|credential|api[-_]?key|private[-_]?key|connectionString|dsn|encryptionKey)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)"#).unwrap(),"$1=[REDACTED]"),
+        (regex::Regex::new(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@").unwrap(),"$1[REDACTED]@")]
+        },
+    );
+    let mut text = value
+        .chars()
+        .filter(|c| !c.is_control() || ['\n', '\r', '\t'].contains(c))
+        .collect::<String>();
+    for (pattern, replacement) in PATTERNS.iter() {
+        text = pattern.replace_all(&text, *replacement).into_owned();
+    }
+    text
+}
 pub fn redact(v: &mut Value) {
     match v {
         Value::Object(obj) => {
@@ -208,6 +227,14 @@ pub fn redact(v: &mut Value) {
                     "privateKey",
                     "key",
                     "passwordHash",
+                    "apiKey",
+                    "accessKey",
+                    "connectionString",
+                    "dsn",
+                    "encryptionKey",
+                    "authorization",
+                    "body",
+                    "blob",
                 ]
                 .iter()
                 .any(|x| k.eq_ignore_ascii_case(x))
@@ -223,12 +250,24 @@ pub fn redact(v: &mut Value) {
                 redact(v)
             }
         }
+        Value::String(value) => *value = safe_text(value),
         _ => {}
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn secrets_in_logs_and_urls_are_redacted() {
+        let mut row = json!({"details":"password=\"value with spaces\" Authorization: Bearer abc123 URL https://user:pass@example.test/", "privateKey":"key", "dsn":"db-secret","publicKey":"public"});
+        redact(&mut row);
+        let text = row.to_string();
+        assert!(!text.contains("value with spaces"));
+        assert!(!text.contains("abc123"));
+        assert!(!text.contains("user:pass"));
+        assert!(!text.contains("db-secret"));
+        assert_eq!(row["publicKey"], "public");
+    }
     #[test]
     fn reject_missing_result() {
         let c = json!([["x:Domain/set",{"create":{"d1":{}}},"c1"]]);
@@ -243,4 +282,49 @@ mod tests {
         )
         .is_ok());
     }
+}
+
+pub async fn metadata(s: &App, server: i64, path: &str) -> Result<Value> {
+    if !["/api/account", "/api/schema"].contains(&path) {
+        bail!("Unsupported metadata path");
+    }
+    let r = sqlx::query(
+        "SELECT base_url,token_encrypted,dry_run FROM stalwart_servers WHERE id=$1 AND active=1",
+    )
+    .bind(server)
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| anyhow!("Server unavailable"))?;
+    if r.get::<i16, _>("dry_run") == 1 {
+        bail!("Dry-run does not query live metadata");
+    }
+    let mut url = url::Url::parse(&r.get::<String, _>("base_url"))?;
+    url.set_path(path);
+    url.set_query(None);
+    url.set_fragment(None);
+    let token = crypto::open(
+        &s.config.key,
+        &r.get::<Option<String>, _>("token_encrypted")
+            .ok_or_else(|| anyhow!("Missing token"))?,
+    )?;
+    let authorization = if let Some(v) = token.strip_prefix("basic:") {
+        format!("Basic {}", v.trim())
+    } else if token.contains(':') && !token.starts_with("API_") {
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(token.as_bytes())
+        )
+    } else {
+        format!("Bearer {token}")
+    };
+    let response = s
+        .http
+        .get(url)
+        .header("authorization", authorization)
+        .send()
+        .await?
+        .error_for_status()?;
+    crate::sepay::bounded_json(response, 4 * 1024 * 1024)
+        .await
+        .map_err(|e| anyhow!(e.1))
 }

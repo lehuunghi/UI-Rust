@@ -40,6 +40,16 @@ async fn main() -> anyhow::Result<()> {
             sqlx::query("INSERT INTO users(name,email,password_hash,role,admin_level,two_factor_enabled) VALUES('Administrator',$1,$2,'admin','super',0)").bind(email.to_lowercase()).bind(hash).execute(&s.db).await?;
             println!("Administrator created. Sign in and enable TOTP in Account security.");
         }
+        "recovery-once" => ui_rust::recovery::tick(&s).await.map_err(|e|anyhow::anyhow!(e.1))?,
+        "recovery-worker" => loop {
+            tokio::select! {_=tokio::signal::ctrl_c()=>break,result=ui_rust::recovery::tick(&s)=>{if let Err(e)=result{tracing::error!(error=%e.1,"Recovery worker failed");}}}
+            tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(std::time::Duration::from_secs(5))=>{}}
+        },
+        "mailbox-once" => ui_rust::mailbox_backup::tick(&s).await.map_err(|e|anyhow::anyhow!(e.1))?,
+        "mailbox-worker" => loop {
+            tokio::select! { _=tokio::signal::ctrl_c()=>break, result=ui_rust::mailbox_backup::tick(&s)=>{if let Err(e)=result {tracing::error!(error=%e.1,"Mailbox worker failed");}} }
+            tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(std::time::Duration::from_secs(5))=>{}}
+        },
         "worker-once" => ui_rust::worker::tick(&s).await?,
         "worker" => loop {
             if let Err(e) = ui_rust::worker::tick(&s).await {
@@ -58,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
         _ => anyhow::bail!(
-            "Usage: ui-rust [serve|worker|worker-once|migrate|create-admin|keygen|backup|restore]"
+            "Usage: ui-rust [serve|worker|worker-once|mailbox-worker|mailbox-once|recovery-worker|recovery-once|migrate|create-admin|keygen|backup|restore]"
         ),
     };
     Ok(())

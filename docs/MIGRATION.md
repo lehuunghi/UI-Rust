@@ -18,44 +18,11 @@ snapshot đó. Repo nguồn giữ nguyên; repo này là một ứng dụng đ�
 | Giao diện | Template PHP | Giao diện mới; giữ các đường dẫn chính tiếng Việt |
 | Update | Tự thay thế mã PHP trong panel | Build image/binary mới rồi triển khai; không cho web tự thay mã thực thi |
 
-## Nghiệp vụ đã chuyển
+## Nghiệp vụ và mức độ tương đương
 
-| Nghiệp vụ | Trạng thái và khác biệt |
-|---|---|
-| Đăng ký, đăng nhập, session | Có; CSRF và kiểm tra Origin; rate limit tài khoản trong PostgreSQL |
-| 2FA | TOTP và email OTP; người quản trị đầu tiên phải bật TOTP sau khi tạo |
-| Quên mật khẩu | Token băm, một lần, 30 phút; SMTP STARTTLS và worker bắt buộc |
-| Đổi mật khẩu, thu hồi phiên | Có; đổi mật khẩu vô hiệu hóa toàn bộ phiên |
-| Quản trị viên | Super admin và manager theo danh sách quyền; không có impersonation |
-| Admin phụ | Phân quyền và phạm vi domain/nhóm; backend kiểm tra từng thao tác |
-| Gói dịch vụ | Thêm/sửa, min/max hạn mức, giá khuyến mãi, thời hạn và dung lượng |
-| Định giá | Đúng công thức `email_qty × effective_monthly_price × billing_months + extra_domains × extra_domain_price`; domain bổ sung không nhân số tháng |
-| Đơn hàng/gia hạn | Tính lại giá trên server; gia hạn bắt đầu sau ngày cuối gói cha; không kích hoạt lại invoice đã có marker |
-| SePay webhook | API key hoặc HMAC timestamp ±300 giây; số tiền nguyên; tài khoản nhận khớp cấu hình; cộng dồn, chống trùng ID/reference, xử lý đồng thời |
-| Đối soát thủ công | Gán giao dịch unmatched cho invoice pending, kèm lý do và nhật ký |
-| SePay User API v2 | Chưa chuyển trình kéo dữ liệu API định kỳ/sandbox; webhook và đối soát thủ công đã có |
-| Dùng thử | Khách hàng đã đăng nhập gửi yêu cầu; admin duyệt 14 ngày; chưa nhận/tải hồ sơ định danh đính kèm |
-| Domain | Quản lý, đồng bộ, tạm ngưng/xóa, TXT xác minh quyền sở hữu; DNS zone được giữ từ phản hồi Stalwart nếu có |
-| DNS | Truy vấn TXT qua Cloudflare DNS-over-HTTPS; chưa kiểm tra đầy đủ MX/SPF/DKIM/DMARC/STARTTLS như module PHP |
-| Hộp thư | Tạo/xóa, đổi tên hiển thị, đổi mật khẩu, tạm ngưng/bật lại với mật khẩu mới |
-| Nhóm và alias | Có; kiểm tra sở hữu, server tương ứng, địa chỉ trùng và quyền của gói |
-| Hạn mức | Khóa dòng khách hàng trước khi đếm/tạo, tránh vượt hạn mức do request đồng thời |
-| Vòng đời | Hết hạn gói; worker tạm ngưng tài nguyên khi khách bị khóa hoặc quá hạn 15 ngày. Domain được bật lại sau gia hạn; hộp thư cần mật khẩu mới |
-| Nhiều server | Gán server cố định cho tài nguyên; không fallback sang server khác khi lỗi; tác vụ kiểm tra version cấu hình |
-| Stalwart JMAP | Kiểm tra call ID, kết quả từng create/update/destroy, lỗi object; giới hạn response 4 MB và timeout |
-| Vận hành nâng cao | Công cụ super-admin truy vấn và preview/execute các method trong allowlist từ nguồn, gồm queue, task, role/tenant, DKIM, API/app credentials, throttles và báo cáo |
-| Luồng vận hành chuyên biệt | Chưa tái tạo từng wizard PHP cho DKIM khẩn cấp, mailbox migration, tenant binding, báo cáo tháng, telemetry/SIEM, TLS và recovery plan |
-| Backup PostgreSQL | CLI Rust gọi pg_dump, mã hóa AES-GCM; restore cần chỉ rõ database đích. Schedule/offsite qua cron/Task Scheduler/rclone |
-| Backup mailbox/blob/config Stalwart | Không nằm trong backup PostgreSQL; các workflow backup/recovery đa cloud của PHP chưa được chuyển |
-| Trang chủ và nội dung | Giá lấy từ database, chỉnh nội dung theo section/language, cấu hình public, escape trên trình duyệt |
-| Ngôn ngữ | Giao diện chính VI/EN và bảng dịch riêng; chưa chuyển toàn bộ catalog ~200 KB mỗi ngôn ngữ và language editor của PHP |
-| SMTP | Email OTP/reset; chưa chuyển toàn bộ mẫu email, chiến dịch gửi hàng loạt và thông báo gia hạn của PHP |
-| CSV/import tài khoản | Chưa có UI import/export hàng loạt của bản PHP |
-
-Các màn hình trên chỉ hiển thị dữ liệu thật hoặc dữ liệu dry-run được đánh dấu rõ.
-Không có dữ liệu mẫu khách hàng, mật khẩu mặc định hay token dịch vụ trong repo.
-Các bảng giữ lại từ schema nguồn phục vụ đối chiếu; bảng chưa có service Rust không
-được coi là một tính năng đã triển khai.
+Xem [bảng đối chiếu và bằng chứng kiểm thử](PARITY.md). Bảng này phân biệt
+implementation đã có, kiểm chứng trên fixture, yêu cầu kiểm chứng dịch vụ thật
+và những luồng PHP còn chưa chuyển. Hiện chưa thể coi hai bản tương đương 100%.
 
 ## Chuyển dữ liệu hiện hữu
 

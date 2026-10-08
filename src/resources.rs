@@ -65,6 +65,11 @@ pub async fn list(
     }
     // Bind stable parameter types even on admin-only queries. Sensitive values never enter the JSON projection.
     let projection="to_jsonb(r)-ARRAY['password_hash','two_factor_secret','token_encrypted','payload_encrypted','payload','calls','result','csrf','password_fingerprint','citizen_id','citizen_file','business_license_file']";
+    let projection = if kind == "trials" {
+        format!("({projection}) || jsonb_build_object('documents',COALESCE((SELECT jsonb_agg(kind ORDER BY kind) FROM trial_documents WHERE trial_id=r.id),'[]'::jsonb))")
+    } else {
+        projection.to_owned()
+    };
     let q=format!("SELECT {projection} FROM {table} r WHERE {} AND $1::bigint IS NOT NULL AND $2::bigint IS NOT NULL AND ($3='' OR ({projection})::text ILIKE '%'||$3||'%') ORDER BY r.id DESC LIMIT 50 OFFSET $4",filters.join(" AND "));
     let rows: Vec<Value> = sqlx::query_scalar(&q)
         .bind(u.owner)
@@ -284,8 +289,9 @@ pub async fn save(
                         .ok_or_else(Error::missing)?
                 } else {
                     sqlx::query_scalar(
-                        "SELECT id FROM stalwart_servers WHERE is_primary=1 AND active=1",
+                        "SELECT s.id FROM stalwart_servers s WHERE s.active=1 AND s.id=COALESCE((SELECT server_id FROM resource_placements WHERE scope='customer' AND resource_id=$1),(SELECT id FROM stalwart_servers WHERE is_primary=1 AND active=1))",
                     )
+                     .bind(owner)
                     .fetch_optional(&mut *tx)
                     .await?
                     .ok_or_else(|| Error::bad("Chưa cấu hình server chính"))?
@@ -375,6 +381,7 @@ pub async fn save(
                 let server: i64 = d
                     .get::<Option<i64>, _>("server_id")
                     .ok_or_else(Error::missing)?;
+                crate::placement::capacity(&mut tx, server, 1).await?;
                 let quota: i32 = p.get("storage_per_account_mb");
                 id=sqlx::query_scalar("INSERT INTO email_accounts(customer_id,domain_id,group_id,email,local_part,display_name,storage_limit_mb,server_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id").bind(owner).bind(domain).bind(group).bind(email).bind(&local).bind(v["display_name"].as_str().unwrap_or("")).bind(quota).bind(server).fetch_one(&mut *tx).await?;
                 enqueue(&s,&mut tx,server,"account_create",id,json!({"local":local,"domain_id":d.get::<String,_>("stalwart_domain_id"),"password":password,"quota":i64::from(quota)*1048576})).await?;
@@ -539,7 +546,13 @@ pub async fn save(
                 } else {
                     text(&v, "status", 20)?
                 };
-                sqlx::query("UPDATE email_aliases SET status=$1,sync_status='pending' WHERE id=$2 AND customer_id=$3 AND email_account_id=$4").bind(status).bind(id).bind(owner).bind(account).execute(&mut *tx).await?;
+                if !matches!(status, "active" | "disabled" | "deleted") {
+                    return Err(Error::bad("Trạng thái alias không hợp lệ"));
+                }
+                let affected = sqlx::query("UPDATE email_aliases SET status=$1,sync_status='pending' WHERE id=$2 AND customer_id=$3 AND email_account_id=$4 AND status<>'deleted'").bind(status).bind(id).bind(owner).bind(account).execute(&mut *tx).await?.rows_affected();
+                if affected != 1 {
+                    return Err(Error::missing());
+                }
             }
             let aliases:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('name',a.local_part,'domainId',d.stalwart_domain_id,'enabled',a.status='active','description',COALESCE(a.description,'')) FROM email_aliases a JOIN domains d ON d.id=a.domain_id WHERE a.email_account_id=$1 AND a.status<>'deleted'").bind(account).fetch_all(&mut *tx).await?;
             let map: serde_json::Map<String, Value> = aliases
@@ -604,6 +617,9 @@ pub async fn save(
                     }
                 }
             } else {
+                if action != "delete" {
+                    return Err(Error::bad("Thao tác admin phụ không được hỗ trợ"));
+                }
                 let uid:i64=sqlx::query_scalar("UPDATE sub_admins SET status='deleted' WHERE id=$1 AND customer_id=$2 RETURNING user_id").bind(id).bind(owner).fetch_optional(&mut *tx).await?.ok_or_else(Error::missing)?;
                 sqlx::query("UPDATE users SET status='deleted' WHERE id=$1")
                     .bind(uid)
@@ -697,7 +713,7 @@ pub async fn save(
             .await?;
         }
         "alerts" => {
-            sqlx::query("UPDATE operational_alerts SET status='acknowledged',acknowledged_by=$1,acknowledged_at=now() WHERE id=$2").bind(u.id).bind(id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE operational_alerts SET status='acknowledged',acknowledged_by=$1,acknowledged_at=now() WHERE id=$2 AND status='open'").bind(u.id).bind(id).execute(&mut *tx).await?;
         }
         _ => {
             return Err(Error::bad(

@@ -33,6 +33,7 @@ fn command(name: &str, c: &Config) -> Result<(Command, String)> {
         bail!("Missing database name")
     }
     let mut cmd = Command::new(name);
+    cmd.kill_on_drop(true);
     cmd.env("PGHOST", url.host_str().unwrap_or("localhost"))
         .env("PGPORT", url.port().unwrap_or(5432).to_string())
         .env("PGUSER", decode(url.username())?)

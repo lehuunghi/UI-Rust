@@ -1,0 +1,229 @@
+{
+  "dns_domains": {
+    "type": "Domain",
+    "properties": [
+      "id",
+      "name",
+      "dnsZoneFile",
+      "dnsManagement",
+      "dkimManagement",
+      "certificateManagement"
+    ]
+  },
+  "dns_servers": {
+    "type": "DnsServer",
+    "properties": [
+      "id",
+      "@type"
+    ]
+  },
+  "dkim_keys": {
+    "type": "DkimSignature",
+    "properties": [
+      "id",
+      "@type",
+      "domainId",
+      "selector",
+      "stage",
+      "publicKey",
+      "createdAt",
+      "nextTransitionAt"
+    ]
+  },
+  "roles": {
+    "type": "Role",
+    "properties": [
+      "id",
+      "description",
+      "memberTenantId",
+      "roleIds",
+      "enabledPermissions",
+      "disabledPermissions"
+    ]
+  },
+  "tenants": {
+    "type": "Tenant",
+    "properties": [
+      "id",
+      "name",
+      "createdAt",
+      "roles",
+      "permissions",
+      "quotas",
+      "usedDiskQuota"
+    ]
+  },
+  "app_passwords": {
+    "type": "AppPassword",
+    "properties": [
+      "id",
+      "description",
+      "createdAt",
+      "expiresAt",
+      "permissions",
+      "allowedIps"
+    ]
+  },
+  "dmarc_reports": {
+    "type": "DmarcExternalReport",
+    "properties": [
+      "id",
+      "report",
+      "receivedAt",
+      "expiresAt",
+      "memberTenantId"
+    ]
+  },
+  "tls_reports": {
+    "type": "TlsExternalReport",
+    "properties": [
+      "id",
+      "report",
+      "receivedAt",
+      "expiresAt",
+      "memberTenantId"
+    ]
+  },
+  "arf_reports": {
+    "type": "ArfExternalReport",
+    "properties": [
+      "id",
+      "report",
+      "receivedAt",
+      "expiresAt",
+      "memberTenantId"
+    ]
+  },
+  "metrics": {
+    "type": "Metric",
+    "properties": [
+      "id",
+      "@type",
+      "count",
+      "sum",
+      "metric",
+      "timestamp"
+    ]
+  },
+  "api_keys": {
+    "type": "ApiKey",
+    "properties": [
+      "id",
+      "description",
+      "createdAt",
+      "expiresAt",
+      "permissions",
+      "allowedIps"
+    ]
+  },
+  "outbound": {
+    "type": "MtaOutboundThrottle",
+    "properties": [
+      "id",
+      "description",
+      "enable",
+      "key",
+      "match",
+      "rate"
+    ]
+  },
+  "inbound": {
+    "type": "MtaInboundThrottle",
+    "properties": [
+      "id",
+      "description",
+      "enable",
+      "key",
+      "match",
+      "rate"
+    ]
+  },
+  "blocked": {
+    "type": "BlockedIp",
+    "properties": [
+      "id",
+      "address",
+      "reason",
+      "createdAt",
+      "expiresAt"
+    ]
+  },
+  "allowed": {
+    "type": "AllowedIp",
+    "properties": [
+      "id",
+      "address",
+      "reason",
+      "createdAt",
+      "expiresAt"
+    ]
+  },
+  "logs": {
+    "type": "Log",
+    "properties": [
+      "id",
+      "timestamp",
+      "level",
+      "event",
+      "details"
+    ]
+  },
+  "traces": {
+    "type": "Trace",
+    "properties": [
+      "id",
+      "timestamp",
+      "from",
+      "to",
+      "size",
+      "events"
+    ]
+  },
+  "queue": {
+    "type": "QueuedMessage",
+    "properties": [
+      "id",
+      "createdAt",
+      "nextRetry",
+      "returnPath",
+      "recipients",
+      "priority",
+      "size"
+    ]
+  },
+  "tasks": {
+    "type": "Task",
+    "properties": [
+      "id",
+      "@type",
+      "status",
+      "due",
+      "accountId",
+      "domainId",
+      "tenantId",
+      "maintenanceType"
+    ]
+  },
+  "certificates": {
+    "type": "Certificate",
+    "properties": [
+      "id",
+      "subjectAlternativeNames",
+      "notValidAfter",
+      "notValidBefore",
+      "issuer"
+    ]
+  },
+  "dkim": {
+    "type": "DkimSignature",
+    "properties": [
+      "id",
+      "@type",
+      "domainId",
+      "selector",
+      "stage",
+      "createdAt",
+      "nextTransitionAt"
+    ]
+  }
+}

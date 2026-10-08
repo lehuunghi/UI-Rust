@@ -22,6 +22,7 @@ pub struct User {
     pub permissions: Value,
     pub csrf: String,
     pub session: String,
+    pub impersonator: Option<i64>,
 }
 impl User {
     pub fn can(&self, p: &str) -> bool {
@@ -60,7 +61,7 @@ pub async fn user(s: &App, h: &HeaderMap, authenticated: bool) -> Result<User> {
     let token = cookie(h)
         .filter(|s| s.len() == 64)
         .ok_or_else(Error::unauthorized)?;
-    let r=sqlx::query("SELECT u.*,s.csrf,s.authenticated,s.password_fingerprint FROM panel_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires_at>now() AND s.revoked_at IS NULL AND u.status='active'").bind(crypto::hash(token)).fetch_optional(&s.db).await?.ok_or_else(Error::unauthorized)?;
+    let r=sqlx::query("SELECT u.*,s.csrf,s.authenticated,s.password_fingerprint,s.impersonator_session FROM panel_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.expires_at>now() AND s.revoked_at IS NULL AND u.status='active'").bind(crypto::hash(token)).fetch_optional(&s.db).await?.ok_or_else(Error::unauthorized)?;
     if authenticated && !r.get::<bool, _>("authenticated") {
         return Err(Error::unauthorized());
     }
@@ -69,6 +70,26 @@ pub async fn user(s: &App, h: &HeaderMap, authenticated: bool) -> Result<User> {
     {
         return Err(Error::unauthorized());
     }
+    let impersonator = if let Some(parent) = r.get::<Option<String>, _>("impersonator_session") {
+        let actor = sqlx::query("SELECT u.id,u.password_hash,s.password_fingerprint,u.admin_level,u.admin_permissions FROM panel_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.authenticated AND s.revoked_at IS NULL AND s.expires_at>now() AND s.impersonator_session IS NULL AND u.role='admin' AND u.status='active'")
+            .bind(parent).fetch_optional(&s.db).await?.ok_or_else(Error::unauthorized)?;
+        let allowed = actor.get::<Option<String>, _>("admin_level").as_deref() == Some("super")
+            || actor
+                .get::<Option<Value>, _>("admin_permissions")
+                .is_some_and(|v| {
+                    v.as_array()
+                        .is_some_and(|a| a.iter().any(|p| p == "customers_impersonate"))
+                });
+        if !allowed
+            || actor.get::<String, _>("password_fingerprint")
+                != crypto::hash(&actor.get::<String, _>("password_hash"))
+        {
+            return Err(Error::unauthorized());
+        }
+        Some(actor.get::<i64, _>("id"))
+    } else {
+        None
+    };
     let id = r.get("id");
     let role: String = r.get("role");
     let owner = r.get::<Option<i64>, _>("parent_customer_id").unwrap_or(id);
@@ -103,6 +124,7 @@ pub async fn user(s: &App, h: &HeaderMap, authenticated: bool) -> Result<User> {
         permissions,
         csrf: r.get("csrf"),
         session: crypto::hash(token),
+        impersonator,
     })
 }
 pub async fn require(s: &App, h: &HeaderMap, p: &str, admin: bool, write: bool) -> Result<User> {
@@ -131,7 +153,7 @@ pub async fn audit(s: &App, uid: Option<i64>, action: &str, context: Value) -> R
         .await?;
     Ok(())
 }
-async fn limit(s: &App, key: &str) -> Result<()> {
+pub(crate) async fn limit(s: &App, key: &str) -> Result<()> {
     let n:i32=sqlx::query_scalar("INSERT INTO auth_rate_limits(bucket,attempts,expires_at) VALUES($1,1,now()+interval '15 minutes') ON CONFLICT(bucket) DO UPDATE SET attempts=CASE WHEN auth_rate_limits.expires_at<now() THEN 1 ELSE auth_rate_limits.attempts+1 END,expires_at=CASE WHEN auth_rate_limits.expires_at<now() THEN now()+interval '15 minutes' ELSE auth_rate_limits.expires_at END RETURNING attempts").bind(crypto::hash(key)).fetch_one(&s.db).await?;
     if n > 10 {
         return Err(Error(
@@ -173,6 +195,14 @@ pub async fn register(
         .await
         .map_err(|e| anyhow::anyhow!(e))??;
     let id:i64=sqlx::query_scalar("INSERT INTO users(name,email,password_hash,role,two_factor_enabled) VALUES($1,$2,$3,'customer',0) RETURNING id").bind(d.name.trim()).bind(email).bind(p).fetch_one(&s.db).await?;
+    crate::notifications::send(
+        &s,
+        id,
+        "customer_registered",
+        json!({}),
+        Some(&format!("register:{id}")),
+    )
+    .await?;
     audit(&s, Some(id), "register", json!({})).await?;
     Ok(Json(json!({"ok":true})))
 }
@@ -217,6 +247,9 @@ pub async fn login(
     }
     sqlx::query("INSERT INTO panel_sessions(id,user_id,ip,device,last_seen_at,expires_at,csrf,password_fingerprint,authenticated) VALUES($1,$2,'',$3,now(),now()+CASE WHEN $6 THEN interval '12 hours' ELSE interval '10 minutes' END,$4,$5,$6)").bind(crypto::hash(&token)).bind(id).bind(h.get("user-agent").and_then(|v|v.to_str().ok()).unwrap_or("").chars().take(255).collect::<String>()).bind(&csrf).bind(fp).bind(!mfa).execute(&s.db).await?;
     audit(&s, Some(id), "login_password", json!({"mfa":mfa})).await?;
+    if !mfa {
+        crate::notifications::send(&s,id,"login_success",json!({"login_time":Utc::now().to_rfc3339(),"ip":"","user_agent":h.get("user-agent").and_then(|v|v.to_str().ok()).unwrap_or("")}),None).await?;
+    }
     Ok((
         [(header::SET_COOKIE, session_cookie(&s, &token))],
         Json(json!({"ok":true,"mfa":mfa,"csrf":csrf,"method":method})),
@@ -237,14 +270,17 @@ async fn send_otp(s: &App, id: i64, email: &str) -> Result<()> {
         .execute(&s.db)
         .await?;
     sqlx::query("INSERT INTO login_otps(user_id,code_hash,expires_at) VALUES($1,$2,now()+interval '5 minutes')").bind(id).bind(crypto::hash(&code)).execute(&s.db).await?;
-    crate::worker::notify(
+    if !crate::notifications::send(
         s,
         id,
-        email,
-        "Mã đăng nhập",
-        &format!("Mã xác thực: {code}. Hết hạn sau 5 phút."),
+        "login_otp",
+        json!({"code":code,"expires_minutes":5,"email":email,"ip":""}),
+        None,
     )
-    .await?;
+    .await?
+    {
+        return Err(Error::bad("Mẫu OTP không khả dụng"));
+    }
     Ok(())
 }
 #[derive(Deserialize)]
@@ -324,6 +360,7 @@ pub async fn verify_mfa(
     }
     let token = crypto::token();
     sqlx::query("UPDATE panel_sessions SET id=$1,authenticated=true,expires_at=now()+interval '12 hours' WHERE id=$2").bind(crypto::hash(&token)).bind(u.session).execute(&s.db).await?;
+    crate::notifications::send(&s,u.id,"login_success",json!({"login_time":Utc::now().to_rfc3339(),"ip":"","user_agent":h.get("user-agent").and_then(|v|v.to_str().ok()).unwrap_or("")}),None).await?;
     Ok((
         [(header::SET_COOKIE, session_cookie(&s, &token))],
         Json(json!({"ok":true})),
@@ -334,7 +371,7 @@ pub async fn me(State(s): State<App>, h: HeaderMap) -> Result<Json<Value>> {
     let u = user(&s, &h, true).await?;
     let info:Value=sqlx::query_scalar("SELECT jsonb_build_object('id',id,'name',name,'email',email,'role',role,'two_factor_enabled',two_factor_enabled,'two_factor_method',two_factor_method) FROM users WHERE id=$1").bind(u.id).fetch_one(&s.db).await?;
     Ok(Json(
-        json!({"user":info,"csrf":u.csrf,"permissions":u.permissions,"admin_level":u.level}),
+        json!({"user":info,"csrf":u.csrf,"permissions":u.permissions,"admin_level":u.level,"impersonator":u.impersonator}),
     ))
 }
 pub async fn logout(State(s): State<App>, h: HeaderMap) -> Result<Response> {
@@ -378,6 +415,9 @@ pub async fn security(
             .and_then(|v| v.to_str().ok())
             .unwrap_or(""),
     ) {
+        return Err(Error::forbidden());
+    }
+    if u.impersonator.is_some() {
         return Err(Error::forbidden());
     }
     let r = sqlx::query(
@@ -521,12 +561,12 @@ pub async fn forgot(
         if !s.config.smtp_host.is_empty() {
             let t = crypto::token();
             sqlx::query("INSERT INTO rust_reset_tokens(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(crypto::hash(&t)).bind(id).execute(&s.db).await?;
-            crate::worker::notify(
+            crate::notifications::send(
                 &s,
                 id,
-                &email,
-                "Đặt lại mật khẩu",
-                &format!("{}/reset-password#{}", s.config.app_url, t),
+                "password_reset",
+                json!({"reset_url":format!("{}/reset-password#{}",s.config.app_url,t)}),
+                None,
             )
             .await?;
         }
@@ -572,4 +612,85 @@ mod tests {
         );
         assert!(!totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "000000", 59));
     }
+}
+
+// An impersonated session remains bound to the original, fully authenticated admin session.
+// Revocation, expiry, password changes, or permission removal invalidate it immediately.
+pub async fn impersonate(
+    State(s): State<App>,
+    h: HeaderMap,
+    Json(v): Json<Value>,
+) -> Result<Response> {
+    let u = require(&s, &h, "customers_impersonate", true, true).await?;
+    let id = crate::resources::number(&v, "customer_id")?;
+    let mut tx = s.db.begin().await?;
+    let hash: String=sqlx::query_scalar("SELECT password_hash FROM users WHERE id=$1 AND role='customer' AND status='active' FOR SHARE").bind(id).fetch_optional(&mut *tx).await?.ok_or_else(Error::missing)?;
+    let token = crypto::token();
+    let csrf = crypto::token();
+    sqlx::query("INSERT INTO panel_sessions(id,user_id,ip,device,last_seen_at,expires_at,csrf,password_fingerprint,authenticated,impersonator_session) SELECT $1,$2,'','Admin support',now(),LEAST(expires_at,now()+interval '1 hour'),$3,$4,true,id FROM panel_sessions WHERE id=$5 AND authenticated AND revoked_at IS NULL AND expires_at>now()")
+        .bind(crypto::hash(&token)).bind(id).bind(&csrf).bind(crypto::hash(&hash)).bind(&u.session).execute(&mut *tx).await?;
+    sqlx::query(
+        "INSERT INTO audit_logs(user_id,action,context) VALUES($1,'customer_impersonate',$2)",
+    )
+    .bind(u.id)
+    .bind(json!({"customer_id":id}))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((
+        [(header::SET_COOKIE, session_cookie(&s, &token))],
+        Json(json!({"ok":true,"csrf":csrf})),
+    )
+        .into_response())
+}
+pub async fn stop_impersonation(State(s): State<App>, h: HeaderMap) -> Result<Response> {
+    // Permit returning even if the customer was disabled; the original admin is checked independently.
+    origin(&s, &h)?;
+    let token = cookie(&h)
+        .filter(|t| t.len() == 64)
+        .ok_or_else(Error::unauthorized)?;
+    let mut tx = s.db.begin().await?;
+    let r=sqlx::query("SELECT csrf,impersonator_session,user_id FROM panel_sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE").bind(crypto::hash(token)).fetch_optional(&mut *tx).await?.ok_or_else(Error::unauthorized)?;
+    if !crypto::equal(
+        &r.get::<String, _>("csrf"),
+        h.get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    ) {
+        return Err(Error::forbidden());
+    }
+    let parent = r
+        .get::<Option<String>, _>("impersonator_session")
+        .ok_or_else(Error::forbidden)?;
+    let a=sqlx::query("SELECT s.csrf,s.password_fingerprint,u.id,u.password_hash FROM panel_sessions s JOIN users u ON u.id=s.user_id WHERE s.id=$1 AND s.impersonator_session IS NULL AND s.authenticated AND s.revoked_at IS NULL AND s.expires_at>now() AND u.role='admin' AND u.status='active' FOR UPDATE OF s").bind(&parent).fetch_optional(&mut *tx).await?.ok_or_else(Error::unauthorized)?;
+    if a.get::<String, _>("password_fingerprint")
+        != crypto::hash(&a.get::<String, _>("password_hash"))
+    {
+        return Err(Error::unauthorized());
+    }
+    let token = crypto::token();
+    let csrf = crypto::token();
+    sqlx::query("DELETE FROM panel_sessions WHERE impersonator_session=$1")
+        .bind(&parent)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE panel_sessions SET id=$1,csrf=$2 WHERE id=$3")
+        .bind(crypto::hash(&token))
+        .bind(&csrf)
+        .bind(&parent)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO audit_logs(user_id,action,context) VALUES($1,'customer_impersonate_stop',$2)",
+    )
+    .bind(a.get::<i64, _>("id"))
+    .bind(json!({"customer_id":r.get::<i64,_>("user_id")}))
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok((
+        [(header::SET_COOKIE, session_cookie(&s, &token))],
+        Json(json!({"ok":true,"csrf":csrf})),
+    )
+        .into_response())
 }
