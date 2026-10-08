@@ -29,7 +29,7 @@ pub fn resource(kind: &str) -> Result<(&'static str, &'static str, bool)> {
         "groups" => ("email_groups", "groups", false),
         "aliases" => ("email_aliases", "accounts", false),
         "subadmins" => ("sub_admins", "admins", false),
-        "subscriptions" => ("subscriptions", "packages", false),
+        "subscriptions" => ("subscriptions", "subscriptions", false),
         "payments" => ("sepay_reconciliation", "subscriptions", true),
         "servers" => ("stalwart_servers", "settings", true),
         "jobs" => ("api_sync_jobs", "operations", true),

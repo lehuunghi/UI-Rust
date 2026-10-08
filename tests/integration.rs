@@ -232,5 +232,20 @@ async fn tenant_quotas_sessions_and_payments(pool: sqlx::PgPool) {
         request(&app, "/api/auth/me", None, Some(&ca)).await.0,
         StatusCode::UNAUTHORIZED
     );
+    let billing_hash = crypto::password("Strong-test-password-123").unwrap();
+    sqlx::query("INSERT INTO users(name,email,password_hash,role,admin_level,admin_permissions,two_factor_enabled) VALUES('Billing','billing@test.example',$1,'admin','billing','[\"subscriptions\"]'::jsonb,0)").bind(billing_hash).execute(&pool).await.unwrap();
+    let billing = login(&app, "billing@test.example").await;
+    assert_eq!(
+        request(&app, "/api/resources/subscriptions", None, Some(&billing))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(&app, "/api/resources/customers", None, Some(&billing))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
     assert!(admin > 0);
 }

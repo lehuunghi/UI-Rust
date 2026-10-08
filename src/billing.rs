@@ -132,7 +132,7 @@ pub async fn invoice(
     h: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>> {
-    let u = auth::require(&s, &h, "packages", false, false).await?;
+    let u = auth::require(&s, &h, "subscriptions", false, false).await?;
     let v:Value=sqlx::query_scalar("SELECT to_jsonb(s)||jsonb_build_object('package_name',p.name,'billing_months',p.billing_months) FROM subscriptions s JOIN packages p ON p.id=s.package_id WHERE s.id=$1 AND (s.customer_id=$2 OR $3)").bind(id).bind(u.owner).bind(u.role=="admin"&&u.can("subscriptions")).fetch_optional(&s.db).await?.ok_or_else(Error::missing)?;
     let mut qr = String::new();
     if !s.config.sepay_account.is_empty()
