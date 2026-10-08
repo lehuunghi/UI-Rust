@@ -12,7 +12,7 @@ try{
  await page.locator('aside a[data-page="packages"]').click();await page.locator('#create').click();await page.locator('#modalform [name=name]').fill('Business Test');await page.locator('#modalform [name=price]').fill('99000');await page.locator('#modalform button[type=submit]').click();await page.locator('td',{hasText:'Business Test'}).waitFor();
  await mkdir('screenshots',{recursive:true});await page.screenshot({path:'screenshots/admin-packages.png',fullPage:true});
  await page.goto('http://localhost:8080/');await page.locator('.plan-card').waitFor();await page.screenshot({path:'screenshots/home-desktop.png',fullPage:true});
- await page.setViewportSize({width:390,height:844});await page.screenshot({path:'screenshots/home-mobile.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1))throw Error('Mobile layout overflows viewport');await page.screenshot({path:'screenshots/home-mobile.png',fullPage:true});
  if(errors.length)throw Error(errors.join('\n'));
  console.log('Browser flow passed: login, dashboard, create plan, homepage, mobile layout.');
 }finally{await browser?.close();server.kill('SIGTERM')}
