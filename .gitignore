@@ -2,3 +2,6 @@
 .env
 /backups
 *.log
+
+/node_modules
+/screenshots

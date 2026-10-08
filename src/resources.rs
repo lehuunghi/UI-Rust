@@ -109,7 +109,14 @@ pub async fn enqueue(
     payload: Value,
 ) -> Result<()> {
     let encrypted = crypto::seal(&s.config.key, &payload.to_string())?;
-    sqlx::query("INSERT INTO api_sync_jobs(job_key,job_type,resource_id,server_id,payload_encrypted,run_after) VALUES($1,$2,$3,$4,$5,now())").bind(crypto::token()).bind(kind).bind(id).bind(server).bind(encrypted).execute(&mut **tx).await?;
+    let version: i64 = sqlx::query_scalar(
+        "SELECT config_version FROM stalwart_servers WHERE id=$1 AND active=1 FOR SHARE",
+    )
+    .bind(server)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(Error::missing)?;
+    sqlx::query("INSERT INTO api_sync_jobs(job_key,job_type,resource_id,server_id,payload_encrypted,server_version,run_after) VALUES($1,$2,$3,$4,$5,$6,now())").bind(crypto::token()).bind(kind).bind(id).bind(server).bind(encrypted).bind(version).execute(&mut **tx).await?;
     Ok(())
 }
 async fn owner_lock(tx: &mut Transaction<'_, Postgres>, id: i64) -> Result<()> {
@@ -663,7 +670,7 @@ pub async fn save(
             if action != "retry" {
                 return Err(Error::bad("Chỉ hỗ trợ retry"));
             }
-            sqlx::query("UPDATE api_sync_jobs SET status='pending',attempts=0,run_after=now(),last_error=NULL WHERE id=$1 AND status='failed'").bind(id).execute(&mut *tx).await?;
+            sqlx::query("UPDATE api_sync_jobs j SET status='pending',attempts=0,run_after=now(),last_error=NULL,server_version=s.config_version FROM stalwart_servers s WHERE j.id=$1 AND j.status='failed' AND s.id=j.server_id AND s.active=1").bind(id).execute(&mut *tx).await?;
         }
         "incidents" => {
             let mut data = v.clone();

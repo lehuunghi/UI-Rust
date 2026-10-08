@@ -1,15 +1,20 @@
 FROM rust:1.90-bookworm AS build
 WORKDIR /app
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 COPY static ./static
-RUN cargo build --release
+RUN cargo build --release --locked
+
+FROM postgres:17-bookworm AS pgtools
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && useradd --system --uid 10001 app
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libpq5 libzstd1 liblz4-1 && rm -rf /var/lib/apt/lists/* && useradd --system --uid 10001 app
 WORKDIR /app
 COPY --from=build /app/target/release/ui-rust /usr/local/bin/ui-rust
+COPY --from=pgtools /usr/lib/postgresql/17/bin/pg_dump /usr/lib/postgresql/17/bin/pg_restore /usr/local/bin/
+COPY --from=pgtools /usr/lib/x86_64-linux-gnu/libpq.so.5* /usr/local/lib/
+RUN ldconfig && mkdir -p /app/backups && chown app:app /app/backups
 COPY static ./static
 USER app
 ENV BIND=0.0.0.0:8080

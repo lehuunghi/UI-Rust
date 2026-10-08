@@ -14,6 +14,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let config = Config::load()?;
+    if cmd == "backup" {
+        let path = ui_rust::backup::create(&config, std::path::Path::new("backups")).await?;
+        println!("{}", path.display());
+        return Ok(());
+    }
+    if cmd == "restore" {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() != 5 || args[3] != "--confirm-db" {
+            anyhow::bail!("Usage: ui-rust restore FILE --confirm-db DATABASE")
+        }
+        ui_rust::backup::restore(&config, std::path::Path::new(&args[2]), &args[4]).await?;
+        return Ok(());
+    }
     let s = ui_rust::state(config).await?;
     match cmd.as_str() {
         "migrate" => {}
@@ -44,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .await?;
         }
-        _ => anyhow::bail!("Usage: ui-rust [serve|worker|worker-once|migrate|create-admin|keygen]"),
+        _ => anyhow::bail!(
+            "Usage: ui-rust [serve|worker|worker-once|migrate|create-admin|keygen|backup|restore]"
+        ),
     };
     Ok(())
 }

@@ -252,19 +252,24 @@ pub struct Code {
     code: String,
 }
 pub fn totp(secret: &str, code: &str, time: i64) -> bool {
+    totp_step(secret, code, time).is_some()
+}
+fn totp_step(secret: &str, code: &str, time: i64) -> Option<i64> {
     use hmac::{Hmac, Mac};
-    let Ok(bytes) = data_encoding::BASE32_NOPAD.decode(secret.as_bytes()) else {
-        return false;
-    };
-    (-1..=1).any(|delta| {
+    let bytes = data_encoding::BASE32_NOPAD.decode(secret.as_bytes()).ok()?;
+    (-1..=1).map(|delta| time / 30 + delta).find(|step| {
+        if *step < 0 {
+            return false;
+        }
         let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&bytes).unwrap();
-        mac.update(&((time / 30 + delta) as u64).to_be_bytes());
+        mac.update(&(*step as u64).to_be_bytes());
         let h = mac.finalize().into_bytes();
         let o = (h[19] & 15) as usize;
         let n = (u32::from_be_bytes(h[o..o + 4].try_into().unwrap()) & 0x7fff_ffff) % 1_000_000;
         crypto::equal(&format!("{n:06}"), code)
     })
 }
+
 pub async fn verify_mfa(
     State(s): State<App>,
     h: HeaderMap,
@@ -288,23 +293,24 @@ pub async fn verify_mfa(
     .fetch_one(&s.db)
     .await?;
     let method: String = r.get("two_factor_method");
+    let mut matched_step = None;
     let valid = if method == "totp" {
         let sec = r
             .get::<Option<String>, _>("two_factor_secret")
             .ok_or_else(Error::unauthorized)?;
-        totp(
+        matched_step = totp_step(
             &crypto::open(&s.config.key, &sec)?,
             &d.code,
             Utc::now().timestamp(),
-        )
+        );
+        matched_step.is_some()
     } else {
         sqlx::query("UPDATE login_otps SET consumed_at=now() WHERE user_id=$1 AND code_hash=$2 AND expires_at>now() AND consumed_at IS NULL").bind(u.id).bind(crypto::hash(&d.code)).execute(&s.db).await?.rows_affected()>0
     };
     if !valid {
         return Err(Error::unauthorized());
     }
-    if method == "totp" {
-        let step = Utc::now().timestamp() / 30;
+    if let Some(step) = matched_step {
         let changed =
             sqlx::query("UPDATE users SET totp_last_step=$1 WHERE id=$2 AND totp_last_step<$1")
                 .bind(step)
@@ -553,4 +559,17 @@ pub async fn reset(
         .await?;
     tx.commit().await?;
     Ok(Json(json!({"ok":true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn totp_rfc_vector() {
+        assert_eq!(
+            totp_step("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "287082", 59),
+            Some(1)
+        );
+        assert!(!totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "000000", 59));
+    }
 }

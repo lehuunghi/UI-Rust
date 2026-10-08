@@ -31,9 +31,22 @@ jobs:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
-      - run: cargo test --all-targets
-      - run: cargo build
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked
       - run: node --check static/app.js
+      - name: Browser smoke test
+        run: |
+          npm install --no-save --package-lock=false playwright@1.56.1
+          npx playwright install --with-deps chromium
+          node tests/browser.mjs
+      - name: Build container
+        run: docker build -t ui-rust:ci .
+      - name: Preserve browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: screenshots
       - name: Preserve dependency lockfile
         if: always()
         uses: actions/upload-artifact@v4

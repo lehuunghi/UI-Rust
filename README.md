@@ -18,7 +18,8 @@ and remaining work. Do not point it at a production database from the PHP applic
 - Giá được tính lại trên server theo công thức của PHP; dùng số thập phân chính xác.
 - SePay API-key/HMAC webhook, chống trùng giao dịch, cộng dồn thanh toán,
   khóa PostgreSQL khi kích hoạt và lưu giao dịch không khớp để kiểm tra.
-- Domain, hộp thư, nhóm, alias, hàng đợi đồng bộ Stalwart, nhiều server và dry-run.
+- Domain, DNS TXT verification, hộp thư, nhóm, alias, đồng bộ Stalwart, nhiều server và dry-run.
+- Backup/restore PostgreSQL mã hóa bằng CLI Rust; worker xử lý tạm ngưng sau hết hạn.
 - Công cụ JMAP quản trị: tra cứu, xem trước thay đổi, xác nhận một lần, kiểm tra
   version server và phản hồi JMAP. Lệnh không được xác nhận không tự chạy lại.
 - Nội dung trang chủ, cấu hình công khai, bản dịch cập nhật theo từng khóa.

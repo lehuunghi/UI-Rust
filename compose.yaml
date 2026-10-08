@@ -21,6 +21,8 @@ services:
       BIND: 0.0.0.0:8080
     ports:
       - '127.0.0.1:8080:8080'
+    volumes:
+      - panel_backups:/app/backups
     depends_on:
       db:
         condition: service_healthy
@@ -37,3 +39,4 @@ services:
     restart: unless-stopped
 volumes:
   postgres_data:
+  panel_backups:

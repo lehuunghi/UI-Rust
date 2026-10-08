@@ -27,6 +27,7 @@ fn credentials(p: &Value) -> Value {
 }
 pub async fn tick(s: &App) -> Result<()> {
     sync_one(s).await?;
+    lifecycle(s).await?;
     mail_one(s).await?;
     sqlx::query("UPDATE subscriptions SET status='expired',updated_at=now() WHERE status='active' AND end_date<current_date").execute(&s.db).await?;
     sqlx::query("DELETE FROM panel_sessions WHERE expires_at<now()-interval '1 day'")
@@ -52,6 +53,17 @@ async fn sync_one(s: &App) -> Result<()> {
     let server = r
         .get::<Option<i64>, _>("server_id")
         .ok_or_else(|| anyhow!("Missing placement"))?;
+    let version: Option<i64> = sqlx::query_scalar(
+        "SELECT config_version FROM stalwart_servers WHERE id=$1 AND active=1 FOR SHARE",
+    )
+    .bind(server)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if version.is_none() || version != r.get::<Option<i64>, _>("server_version") {
+        sqlx::query("UPDATE api_sync_jobs SET status='failed',last_error='Server configuration changed; review before retry.',updated_at=now() WHERE id=$1").bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
     let kind: String = r.get("job_type");
     let p: Value = serde_json::from_str(&crypto::open(
         &s.config.key,
@@ -158,5 +170,68 @@ async fn mail_one(s: &App) -> Result<()> {
     let sent = transport.send(message).await.is_ok();
     sqlx::query("UPDATE notifications SET status=CASE WHEN $2 THEN 'sent' WHEN attempts>=4 THEN 'failed' ELSE 'pending' END,attempts=attempts+1,body_encrypted=CASE WHEN $2 THEN '' ELSE body_encrypted END,run_after=now()+interval '2 minutes' WHERE id=$1").bind(id).bind(sent).execute(&mut *tx).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+// Suspend remote resources after a customer is disabled or after the 15-day expiry grace period.
+// Re-enabling a mailbox intentionally requires a new password; the panel never retains plaintext credentials.
+async fn lifecycle(s: &App) -> Result<()> {
+    let customers:Vec<i64>=sqlx::query_scalar("SELECT u.id FROM users u WHERE u.role='customer' AND (EXISTS(SELECT 1 FROM domains d WHERE d.customer_id=u.id AND d.status<>'deleted') OR EXISTS(SELECT 1 FROM email_accounts a WHERE a.customer_id=u.id AND a.status<>'deleted')) ORDER BY u.id").fetch_all(&s.db).await?;
+    for owner in customers {
+        let mut tx = s.db.begin().await?;
+        let status: String = sqlx::query_scalar("SELECT status FROM users WHERE id=$1 FOR UPDATE")
+            .bind(owner)
+            .fetch_one(&mut *tx)
+            .await?;
+        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE customer_id=$1 AND status='active' AND current_date BETWEEN start_date AND end_date)").bind(owner).fetch_one(&mut *tx).await?;
+        let expired:bool=sqlx::query_scalar("SELECT COALESCE(max(end_date)<current_date-15,false) FROM subscriptions WHERE customer_id=$1 AND status IN ('active','expired','cancelled')").bind(owner).fetch_one(&mut *tx).await?;
+        let suspend = status != "active" || (!active && expired);
+        if suspend {
+            let ds=sqlx::query("UPDATE domains SET status='disabled',suspended_by_customer=1,sync_status='pending',updated_at=now() WHERE customer_id=$1 AND status='active' AND stalwart_domain_id IS NOT NULL RETURNING id,server_id,stalwart_domain_id").bind(owner).fetch_all(&mut *tx).await?;
+            for d in ds {
+                crate::resources::enqueue(
+                    s,
+                    &mut tx,
+                    d.get::<Option<i64>, _>("server_id")
+                        .ok_or_else(|| anyhow!("Domain has no server"))?,
+                    "domain_status",
+                    d.get("id"),
+                    json!({"remote_id":d.get::<String,_>("stalwart_domain_id"),"enabled":false}),
+                )
+                .await
+                .map_err(|e| anyhow!("{}", e.1))?;
+            }
+            let accounts=sqlx::query("UPDATE email_accounts SET status='disabled',suspended_by_customer=1,sync_status='pending',updated_at=now() WHERE customer_id=$1 AND status='active' AND stalwart_account_id IS NOT NULL RETURNING id,server_id,stalwart_account_id").bind(owner).fetch_all(&mut *tx).await?;
+            for a in accounts {
+                crate::resources::enqueue(
+                    s,
+                    &mut tx,
+                    a.get::<Option<i64>, _>("server_id")
+                        .ok_or_else(|| anyhow!("Mailbox has no server"))?,
+                    "account_status",
+                    a.get("id"),
+                    json!({"remote_id":a.get::<String,_>("stalwart_account_id"),"password":null}),
+                )
+                .await
+                .map_err(|e| anyhow!("{}", e.1))?;
+            }
+        } else if status == "active" && active {
+            let ds=sqlx::query("UPDATE domains SET status='active',suspended_by_customer=0,sync_status='pending',updated_at=now() WHERE customer_id=$1 AND status='disabled' AND suspended_by_customer=1 AND stalwart_domain_id IS NOT NULL RETURNING id,server_id,stalwart_domain_id").bind(owner).fetch_all(&mut *tx).await?;
+            for d in ds {
+                crate::resources::enqueue(
+                    s,
+                    &mut tx,
+                    d.get::<Option<i64>, _>("server_id")
+                        .ok_or_else(|| anyhow!("Domain has no server"))?,
+                    "domain_status",
+                    d.get("id"),
+                    json!({"remote_id":d.get::<String,_>("stalwart_domain_id"),"enabled":true}),
+                )
+                .await
+                .map_err(|e| anyhow!("{}", e.1))?;
+            }
+        }
+        tx.commit().await?;
+    }
     Ok(())
 }

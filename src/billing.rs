@@ -367,8 +367,12 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
     sqlx::query("SELECT pg_advisory_xact_lock(88261731)")
         .execute(&mut *tx)
         .await?;
-    let saved=sqlx::query("SELECT * FROM sepay_reconciliation WHERE source_key=$1 OR (mode='live' AND bank_identity=$2)").bind(&source).bind(&bank).fetch_optional(&mut *tx).await?;
-    if let Some(r) = saved {
+    let saved=sqlx::query("SELECT r.* FROM sepay_reconciliation r WHERE r.source_key=$1 OR (r.mode='live' AND r.bank_identity=$2) OR r.id IN (SELECT reconciliation_id FROM sepay_receipts WHERE source_key=$1)").bind(&source).bind(&bank).fetch_all(&mut *tx).await?;
+    if !saved.is_empty() {
+        if saved.len() != 1 {
+            return Err(Error::conflict("Conflicting transaction identities"));
+        }
+        let r = &saved[0];
         if r.get::<Decimal, _>("amount") != Decimal::from(amount)
             || r.get::<String, _>("account_number") != s.config.sepay_account
             || r.get::<String, _>("reference_code") != reference
@@ -376,6 +380,8 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
         {
             return Err(Error::conflict("Transaction id conflict"));
         }
+        sqlx::query("INSERT INTO sepay_receipts(source_key,reconciliation_id) VALUES($1,$2) ON CONFLICT DO NOTHING").bind(&source).bind(r.get::<i64,_>("id")).execute(&mut *tx).await?;
+        tx.commit().await?;
         return Ok(Json(json!({"success":true,"duplicate":true})));
     }
     let sub = sqlx::query("SELECT id,customer_id FROM subscriptions WHERE invoice_code=$1")
@@ -390,6 +396,11 @@ pub async fn webhook(State(s): State<App>, h: HeaderMap, body: Bytes) -> Result<
             .await?;
     }
     let rid:i64=sqlx::query_scalar("INSERT INTO sepay_reconciliation(source_key,mode,source,provider_id,bank_identity,account_number,reference_code,amount,content,invoice_code,subscription_id,state) VALUES($1,'live','webhook',$2,$3,$4,$5,$6,$7,$8,$9,'unmatched') RETURNING id").bind(&source).bind(tid.to_string()).bind(bank).bind(&s.config.sepay_account).bind(reference).bind(Decimal::from(amount)).bind(p["content"].as_str().unwrap_or("")).bind(&code).bind(sid).fetch_one(&mut *tx).await?;
+    sqlx::query("INSERT INTO sepay_receipts(source_key,reconciliation_id) VALUES($1,$2)")
+        .bind(&source)
+        .bind(rid)
+        .execute(&mut *tx)
+        .await?;
     let mut state = "unmatched";
     if let Some(id) = sid {
         let r = sqlx::query("SELECT * FROM subscriptions WHERE id=$1 FOR UPDATE")
@@ -457,6 +468,71 @@ mod tests {
             "INV123456789012"
         );
         assert!(invoice_code("INV123456789012", "INV123456789013").is_err());
+        assert!(invoice_code("", "INV123456789012 INV123456789013").is_err());
         assert_eq!(invoice_code("XINV123456789012", "").unwrap(), "");
     }
+}
+
+pub async fn reconcile(
+    State(s): State<App>,
+    h: HeaderMap,
+    Path(id): Path<i64>,
+    Json(v): Json<Value>,
+) -> Result<Json<Value>> {
+    let u = auth::require(&s, &h, "subscriptions", true, true).await?;
+    let code = crate::resources::text(&v, "invoice_code", 40)?;
+    let note = crate::resources::text(&v, "note", 500)?;
+    let mut tx = s.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(88261731)")
+        .execute(&mut *tx)
+        .await?;
+    let sub = sqlx::query("SELECT id,customer_id FROM subscriptions WHERE invoice_code=$1")
+        .bind(code)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(Error::missing)?;
+    let sid: i64 = sub.get("id");
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR UPDATE")
+        .bind(sub.get::<i64, _>("customer_id"))
+        .fetch_one(&mut *tx)
+        .await?;
+    let invoice = sqlx::query("SELECT * FROM subscriptions WHERE id=$1 FOR UPDATE")
+        .bind(sid)
+        .fetch_one(&mut *tx)
+        .await?;
+    if invoice.get::<String, _>("status") != "pending"
+        || invoice.get::<i16, _>("is_trial") == 1
+        || invoice.get::<String, _>("payment_method") != "sepay"
+    {
+        return Err(Error::conflict("Hóa đơn không còn nhận thanh toán"));
+    }
+    let r=sqlx::query("SELECT * FROM sepay_reconciliation WHERE id=$1 AND mode='live' AND ledger_id IS NULL AND state IN ('unmatched','needs_review') FOR UPDATE").bind(id).fetch_optional(&mut *tx).await?.ok_or_else(||Error::conflict("Giao dịch không thể gán lại"))?;
+    let tid = r
+        .get::<String, _>("provider_id")
+        .parse::<i64>()
+        .map_err(|_| Error::bad("ID giao dịch không hợp lệ"))?;
+    let lid:i64=sqlx::query_scalar("INSERT INTO payment_transactions(subscription_id,provider_transaction_id,account_number,reference_code,content,transfer_type,amount,raw_payload) VALUES($1,$2,$3,$4,$5,'in',$6,$7) RETURNING id").bind(sid).bind(tid).bind(r.get::<String,_>("account_number")).bind(r.get::<String,_>("reference_code")).bind(r.get::<String,_>("content")).bind(r.get::<Decimal,_>("amount")).bind(json!({"reconciliation_id":id,"actor":u.id})).fetch_one(&mut *tx).await?;
+    let total:Decimal=sqlx::query_scalar("SELECT COALESCE(sum(amount),0) FROM payment_transactions WHERE subscription_id=$1 AND provider='sepay' AND transfer_type='in'").bind(sid).fetch_one(&mut *tx).await?;
+    let due: Decimal = invoice.get("price");
+    let state = if total >= due {
+        activate(&mut tx, sid).await?;
+        if total > due {
+            "overpaid"
+        } else {
+            "paid"
+        }
+    } else {
+        "partial"
+    };
+    // Preserve the original invoice_code used for replay comparison; store the resolved subscription separately.
+    sqlx::query("UPDATE sepay_reconciliation SET subscription_id=$1,ledger_id=$2,state=$3,note=$4,reviewed_by=$5,reviewed_at=now() WHERE id=$6").bind(sid).bind(lid).bind(state).bind(note).bind(u.id).bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    auth::audit(
+        &s,
+        Some(u.id),
+        "manual_reconciliation",
+        json!({"id":id,"subscription":sid}),
+    )
+    .await?;
+    Ok(Json(json!({"ok":true,"state":state})))
 }
