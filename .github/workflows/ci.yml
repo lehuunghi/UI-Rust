@@ -41,6 +41,17 @@ jobs:
           node tests/browser.mjs
       - name: Build container
         run: docker build -t ui-rust:ci .
+      - name: Encrypted backup and isolated restore
+        env:
+          APP_KEY: a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+          PGPASSWORD: postgres
+        run: |
+          mkdir backup-check
+          chmod 777 backup-check
+          backup_path=$(docker run --rm --network host -e DATABASE_URL -e APP_KEY -v "$PWD/backup-check:/app/backups" ui-rust:ci backup)
+          createdb -h localhost -U postgres ui_restore
+          docker run --rm --network host -e DATABASE_URL=postgres://postgres:postgres@localhost:5432/ui_restore -e APP_KEY -v "$PWD/backup-check:/app/backups" ui-rust:ci restore "$backup_path" --confirm-db ui_restore
+          test "$(psql -h localhost -U postgres -d ui_restore -Atc "SELECT count(*) FROM packages WHERE name='Business Test'")" = "1"
       - name: Preserve browser screenshots
         if: always()
         uses: actions/upload-artifact@v4
